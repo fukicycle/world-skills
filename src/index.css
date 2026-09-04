@@ -1,0 +1,7 @@
+/* Reset CSS to ensure App.css has full control over the UI */
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100vh;
+}

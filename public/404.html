@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>WorldSkills Portal</title>
+    <script type="text/javascript">
+      // GitHub Pages SPA Routing Hack
+      var l = window.location;
+      var path = l.pathname;
+      
+      // Determine base prefix (repo name if hosted on github.io)
+      var pathParts = path.split('/');
+      var hasRepo = l.hostname.indexOf('github.io') !== -1;
+      var prefix = '';
+      if (hasRepo && pathParts.length > 1) {
+        prefix = '/' + pathParts[1];
+      }
+      
+      var subPath = path.substring(prefix.length);
+      
+      l.replace(
+        l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
+        prefix + '/?p=' + encodeURIComponent(subPath) +
+        (l.search ? '&q=' + encodeURIComponent(l.search.slice(1)) : '') +
+        l.hash
+      );
+    </script>
+  </head>
+  <body>
+  </body>
+</html>

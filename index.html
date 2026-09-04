@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <!-- SEO & OGP Settings -->
+    <title>Tech Athletes | WorldSkills Portal</title>
+    <meta name="description" content="Celebrating the world's elite young artisans and technologists. Explore WorldSkills champions, medals, and national technical statistics." />
+    <meta property="og:title" content="Tech Athletes | WorldSkills Portal" />
+    <meta property="og:description" content="Celebrating the world's elite young artisans and technologists. Explore WorldSkills champions, medals, and national technical statistics." />
+    <meta property="og:image" content="/ogp-image.jpg" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- Premium Typography (Inter Font) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <!-- GitHub Pages SPA Routing Hack - Restore Path -->
+    <script type="text/javascript">
+      (function() {
+        var l = window.location;
+        if (l.search) {
+          var q = {};
+          l.search.slice(1).split('&').forEach(function(v) {
+            var a = v.split('=');
+            q[a[0]] = decodeURIComponent(a[1]);
+          });
+          if (q.p !== undefined) {
+            // Restore path and queries safely
+            var newUrl = l.pathname.slice(0, -1) + (q.p || '') +
+              (q.q ? ('?' + q.q) : '') +
+              l.hash;
+            window.history.replaceState(null, null, newUrl);
+          }
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
