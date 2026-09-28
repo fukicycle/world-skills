@@ -1,18 +1,23 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import './i18n';
 import './App.css';
-import { 
-  fetchResults,
+import AnalyticsView from './components/AnalyticsView';
+import {
+  countryName,
+  fetchAllResults,
   fetchEvents,
+  fetchResults,
+  isPodium,
+  skillName,
   type Event,
-  type JoinedResult, 
-  type Skill,
+  type JoinedResult,
+  type Lang,
   type Member,
-  SECTOR_NAMES,
-  SKILL_NAMES,
-  MEMBER_NAMES
-} from './data/mockData';
+  type Skill,
+  SECTOR_NAMES
+} from './data/worldskills';
+import type { SectorKey } from './data/skillCatalog';
 
 // SVG Icons as React inline SVGs for zero extra dependencies
 const Icons = {
@@ -110,25 +115,59 @@ const Icons = {
   )
 };
 
+// Parse skill numbers into integer to sort strictly ascending globally
+const getSkillNumberVal = (num: string): number => {
+  const parsed = parseInt(num.replace(/^0+/, ''), 10);
+  return isNaN(parsed) ? 9999 : parsed;
+};
+
+// Convert full names to shortened initial name format (E.g., "YUTO TAKAHASHI" -> "Y. TAKAHASHI")
+const getShortName = (fullName: string): string => {
+  const parts = fullName.trim().toUpperCase().split(/\s+/);
+  if (parts.length === 0) return '';
+  if (parts.length === 1) return parts[0];
+  return `${parts[0][0]}. ${parts.slice(1).join(' ')}`;
+};
+
+// Short event label (E.g., "WorldSkills Lyon 2024" -> "LYON '24", the 2022 Special Edition -> "SPECIAL '22")
+const getEventYearLabel = (event: Event): string => {
+  const shortYear = event.startDate.slice(2, 4);
+  if (event.code.endsWith('SE')) return `SPECIAL '${shortYear}`;
+  const city = event.name.replace(/^WorldSkills (Competition )?/, '').replace(/\s*\d{4}.*$/, '');
+  return `${(city || 'WSC').toUpperCase()} '${shortYear}`;
+};
+
 export default function App() {
   const { t, i18n } = useTranslation();
   
   // App views navigation (Added 'champions' for the Mosaic Wall)
   const [currentView, setCurrentView] = useState<'hallOfFame' | 'champions' | 'dashboard' | 'skills'>('hallOfFame');
   
+  const lang = (i18n.language === 'en' ? 'en' : 'ja') as Lang;
+
   // Real API loading states
   const [events, setEvents] = useState<Event[]>([]);
-  const [allResults, setAllResults] = useState<JoinedResult[]>([]);
-  const [allGoldResults, setAllGoldResults] = useState<JoinedResult[]>([]); // Dynamic cache for all events gold medalists
-  const [isLoading, setIsLoading] = useState(true);
+  // Results of the selected event, tagged with the event they belong to
+  const [loadedResults, setLoadedResults] = useState<{ eventId: number | null; results: JoinedResult[] }>({ eventId: null, results: [] });
+  // Results of every competition, loaded only when a view needs history
+  const [history, setHistory] = useState<Map<number, JoinedResult[]> | null>(null);
+  const [historyProgress, setHistoryProgress] = useState(0);
+  // Competitor ID from a shared link, resolved once history is loaded
+  const [pendingShareId, setPendingShareId] = useState<number | null>(() => {
+    const param = new URLSearchParams(window.location.search).get('competitorId');
+    const parsed = param ? parseInt(param, 10) : NaN;
+    return isNaN(parsed) ? null : parsed;
+  });
 
   // OGP / Focus Share Mode State
   const [focusCompetitor, setFocusCompetitor] = useState<JoinedResult | null>(null);
   const [showCopiedToast, setShowCopiedToast] = useState(false);
 
   // Filter States
-  const [selectedEventId, setSelectedEventId] = useState<number>(579); // Default: WSC Lyon 2024 (579)
-  const [selectedSector, setSelectedSector] = useState<string | null>(null); // Null means all
+  const [selectedEventId, setSelectedEventId] = useState<number | null>(null); // Null until events are loaded
+  // True while the event was picked automatically rather than by the user
+  const autoSelectedEvent = useRef(true);
+  const [selectedSector, setSelectedSector] = useState<SectorKey | null>(null); // Null means all
   
   // Autocomplete & search inputs
   const [countrySearch, setCountrySearch] = useState('');
@@ -152,120 +191,90 @@ export default function App() {
   const countryRef = useRef<HTMLDivElement>(null);
   const competitorRef = useRef<HTMLDivElement>(null);
 
-  // Parse skill numbers into integer to sort strictly ascending globally
-  const getSkillNumberVal = (num: string): number => {
-    const clean = num.replace(/^0+/, '');
-    const parsed = parseInt(clean, 10);
-    return isNaN(parsed) ? 9999 : parsed;
-  };
-
-  // Convert full names to shortened initial name format (E.g., "YUTO TAKAHASHI" -> "Y. TAKAHASHI")
-  const getShortName = (fullName: string): string => {
-    const parts = fullName.trim().toUpperCase().split(/\s+/);
-    if (parts.length === 0) return '';
-    if (parts.length === 1) return parts[0];
-    const firstInitial = parts[0][0];
-    const lastNamePart = parts.slice(1).join(' ');
-    return `${firstInitial}. ${lastNamePart}`;
-  };
-
-  // Extract short event year label (E.g., "WorldSkills Lyon 2024" -> "LYON '24")
-  const getEventYearLabel = (eventName: string): string => {
-    const parts = eventName.split(' ');
-    const year = parts.pop() || '';
-    const name = parts.pop() || 'WSC';
-    const shortYear = year.slice(-2);
-    return `${name.toUpperCase()} '${shortYear}`;
-  };
-
-  // 1. Initial Load, Dynamic Share Parameters, and All-Gold parallel fetching
+  // 1. Load the competition list and default to the most recent one
   useEffect(() => {
-    const initializeAndLoad = async () => {
-      setIsLoading(true);
-      const params = new URLSearchParams(window.location.search);
-      const competitorIdParam = params.get('competitorId');
-      
-      // A. Dynamically fetch WSC global competitions from REST API!
-      const loadedEvents = await fetchEvents();
+    let active = true;
+    fetchEvents().then(loadedEvents => {
+      if (!active) return;
       setEvents(loadedEvents);
-      
-      // B. Automatically select the most recent CLOSED (completed) event as default!
-      const concludedEvents = loadedEvents.filter(ev => ev.closed);
-      const defaultEvent = concludedEvents[0] || loadedEvents[0] || { id: 579, closed: true };
-      setSelectedEventId(defaultEvent.id);
+      setSelectedEventId(prev => prev ?? loadedEvents[0]?.id ?? null);
+    });
 
-      // C. Parallel fetch results of ALL completed historical events for the Champions wall!
-      const resultsArrays = await Promise.all(
-        concludedEvents.map(ev => fetchResults(ev.id))
-      );
-      
-      const combinedResults = resultsArrays.flat();
-      const podiumMedalists = combinedResults
-        .filter(r => r.medal === 'GOLD' || r.medal === 'SILVER' || r.medal === 'BRONZE')
-        .sort((a, b) => getSkillNumberVal(a.skill.number) - getSkillNumberVal(b.skill.number) || b.eventId - a.eventId);
-      
-      setAllGoldResults(podiumMedalists);
-
-      // Check if entering through a direct shared competitor ID link
-      if (competitorIdParam) {
-        const parsedId = parseInt(competitorIdParam, 10);
-        const matchedResult = combinedResults.find(res => 
-          res.competitors.some(c => c.personId === parsedId)
-        );
-        
-        if (matchedResult) {
-          setSelectedEventId(matchedResult.eventId);
-          const idx = concludedEvents.findIndex(ev => ev.id === matchedResult.eventId);
-          if (idx !== -1) {
-            setAllResults(resultsArrays[idx]);
-          } else {
-            const olderData = await fetchResults(matchedResult.eventId);
-            setAllResults(olderData);
-          }
-          
-          setFocusCompetitor(matchedResult);
-          setIsLoading(false);
-          return;
-        }
-      }
-      
-      // Default: load most recent closed event results (corresponds to resultsArrays of defaultEvent)
-      const defaultEventIdx = concludedEvents.findIndex(ev => ev.id === defaultEvent.id);
-      setAllResults(resultsArrays[defaultEventIdx] || resultsArrays[0] || []);
-      setIsLoading(false);
-    };
-
-    initializeAndLoad();
-
-    // Listen for History popstate changes
+    // Leaving focus mode via the browser back button
     const handlePopState = () => {
-      const params = new URLSearchParams(window.location.search);
-      const competitorIdParam = params.get('competitorId');
-      if (!competitorIdParam) {
+      if (!new URLSearchParams(window.location.search).get('competitorId')) {
         setFocusCompetitor(null);
       }
     };
     window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+    return () => {
+      active = false;
+      window.removeEventListener('popstate', handlePopState);
+    };
   }, []);
 
-  // 2. Fetch results on Event Selector Change
+  // 2. Results of the selected competition (cached per event in the data layer)
   useEffect(() => {
-    if (focusCompetitor && focusCompetitor.eventId === selectedEventId) return;
+    const event = events.find(ev => ev.id === selectedEventId);
+    if (!event) return;
 
     let active = true;
-    const loadEventData = async () => {
-      setIsLoading(true);
-      const data = await fetchResults(selectedEventId);
-      if (active) {
-        setAllResults(data);
-        setIsLoading(false);
+    fetchResults(event).then(results => {
+      if (!active) return;
+      // Skip ahead when the newest competition has no published results yet
+      const next = events[events.indexOf(event) + 1];
+      if (results.length === 0 && autoSelectedEvent.current && next) {
+        setSelectedEventId(next.id);
+        return;
       }
-    };
-
-    loadEventData();
+      setLoadedResults({ eventId: event.id, results });
+    });
     return () => { active = false; };
-  }, [selectedEventId]);
+  }, [events, selectedEventId]);
+
+  const isLoading = selectedEventId === null || loadedResults.eventId !== selectedEventId;
+  const allResults = loadedResults.results;
+
+  // 3. Every competition's results, for the champions wall, analytics and shared links
+  const needsHistory = currentView === 'champions' || currentView === 'dashboard' || pendingShareId !== null;
+  useEffect(() => {
+    if (!needsHistory || history || events.length === 0) return;
+
+    let active = true;
+    fetchAllResults(events, loaded => active && setHistoryProgress(loaded)).then(results => {
+      if (!active) return;
+      setHistory(results);
+
+      // Open the athlete card from a shared link
+      if (pendingShareId !== null) {
+        for (const eventResults of results.values()) {
+          const match = eventResults.find(res => res.competitors.some(c => c.personId === pendingShareId));
+          if (match) {
+            autoSelectedEvent.current = false;
+            setSelectedEventId(match.eventId);
+            setFocusCompetitor(match);
+            break;
+          }
+        }
+        setPendingShareId(null);
+      }
+    });
+    return () => { active = false; };
+  }, [needsHistory, history, events, pendingShareId]);
+
+  // Competitions whose results turned out to be empty are hidden once known
+  const visibleEvents = history
+    ? events.filter(ev => (history.get(ev.id)?.length ?? 0) > 0)
+    : events;
+
+  // Podium finishes across all competitions, by skill number then newest first
+  const allGoldResults = useMemo(() => {
+    if (!history) return [];
+    return Array.from(history.values())
+      .flat()
+      .filter(r => isPodium(r.medal))
+      .sort((a, b) => getSkillNumberVal(a.skill.number) - getSkillNumberVal(b.skill.number) || b.event.startDate.localeCompare(a.event.startDate));
+  }, [history]);
 
   // Suggestions dynamic lists computed reactively from active results set
   const availableMembers = Array.from(
@@ -284,9 +293,7 @@ export default function App() {
   const countrySuggestions = countrySearch.trim() === '' 
     ? [] 
     : availableMembers.filter(m => {
-        const lang = i18n.language as 'en' | 'ja';
-        const nameText = MEMBER_NAMES[m.id]?.[lang] || m.name;
-        return nameText.toLowerCase().includes(countrySearch.toLowerCase());
+        return countryName(m, lang).toLowerCase().includes(countrySearch.toLowerCase());
       });
 
   const competitorSuggestions = competitorSearch.trim() === ''
@@ -313,9 +320,7 @@ export default function App() {
   const championsCountrySuggestions = championsCountrySearch.trim() === ''
     ? []
     : championsMembers.filter(m => {
-        const lang = i18n.language as 'en' | 'ja';
-        const nameText = MEMBER_NAMES[m.id]?.[lang] || m.name;
-        return nameText.toLowerCase().includes(championsCountrySearch.toLowerCase());
+        return countryName(m, lang).toLowerCase().includes(championsCountrySearch.toLowerCase());
       });
 
   // Close suggestions on outside clicks
@@ -351,7 +356,7 @@ export default function App() {
       if (!match) return false;
     }
 
-    return res.medal === 'GOLD' || res.medal === 'SILVER' || res.medal === 'BRONZE';
+    return isPodium(res.medal);
   });
 
   // Extract unique skills present in the filtered results, always sorted by skill number
@@ -359,17 +364,8 @@ export default function App() {
     new Map(filteredResults.map(r => [r.skill.id, r.skill])).values()
   ).sort((a, b) => getSkillNumberVal(a.number) - getSkillNumberVal(b.number));
 
-  // Translate country name dynamically
-  const getCountryName = (member: Member) => {
-    const lang = i18n.language as 'en' | 'ja';
-    return MEMBER_NAMES[member.id]?.[lang] || member.name;
-  };
-
-  // Translate skill name dynamically
-  const getSkillName = (skill: Skill) => {
-    const lang = i18n.language as 'en' | 'ja';
-    return SKILL_NAMES[skill.baseId]?.[lang] || skill.name;
-  };
+  const getCountryName = (member: Member) => countryName(member, lang);
+  const getSkillName = (skill: Skill) => skillName(skill, lang);
 
   // SNS Card URL Copier
   const handleShareCard = (competitorId: number | null) => {
@@ -401,38 +397,11 @@ export default function App() {
     setFocusCompetitor(null);
   };
 
-  // 4. Stats Aggregation Logic (Country-wise aggregates)
-  const countryStats = availableMembers.map(m => {
-    const countryResults = allResults.filter(r => r.memberId === m.id);
-    const gold = countryResults.filter(r => r.medal === 'GOLD').length;
-    const silver = countryResults.filter(r => r.medal === 'SILVER').length;
-    const bronze = countryResults.filter(r => r.medal === 'BRONZE').length;
-    const excellence = countryResults.filter(r => r.medal === 'EXCELLENCE').length;
-    
-    const totalCompetitors = countryResults.length;
-    const excellenceRate = totalCompetitors > 0 
-      ? Math.round(((gold + silver + bronze + excellence) / totalCompetitors) * 100) 
-      : 0;
-
-    const powerIndex = (gold * 3) + (silver * 2) + (bronze * 1) + (excellence * 0.5);
-
-    return {
-      member: m,
-      gold,
-      silver,
-      bronze,
-      excellence,
-      excellenceRate,
-      powerIndex,
-      total: gold + silver + bronze
-    };
-  }).sort((a, b) => b.powerIndex - a.powerIndex || b.gold - a.gold);
-
   // Group active skills by sectors
-  const skillsBySector = Object.keys(SECTOR_NAMES).reduce<Record<string, Skill[]>>((acc, sec) => {
-    acc[sec] = availableSkills.filter(s => s.sector === sec);
-    return acc;
-  }, {});
+  const skillsBySector = (Object.keys(SECTOR_NAMES) as SectorKey[]).map(sec => ({
+    sector: sec,
+    skills: availableSkills.filter(s => s.sector === sec),
+  })).filter(group => group.skills.length > 0);
 
   return (
     <div className="app-container">
@@ -580,13 +549,16 @@ export default function App() {
             
             {/* Event Timeline Scoping */}
             <div className="event-picker">
-              {events.map(ev => (
+              {visibleEvents.map(ev => (
                 <button 
                   key={ev.id}
                   className={`event-chip ${selectedEventId === ev.id ? 'active' : ''}`}
-                  onClick={() => setSelectedEventId(ev.id)}
+                  onClick={() => {
+                    autoSelectedEvent.current = false;
+                    setSelectedEventId(ev.id);
+                  }}
                 >
-                  {ev.name.split('WorldSkills ').pop()}
+                  {ev.name.replace(/^WorldSkills (Competition )?/, '')}
                 </button>
               ))}
             </div>
@@ -600,8 +572,8 @@ export default function App() {
                 <div style={{ fontSize: '0.9rem', fontWeight: '800', opacity: '0.8' }}>A</div>
                 {t('allSectors')}
               </button>
-              {Object.entries(SECTOR_NAMES).map(([key, value]) => {
-                const IconComponent = Icons[key as keyof typeof Icons] || (() => null);
+              {(Object.entries(SECTOR_NAMES) as [SectorKey, { en: string; ja: string }][]).map(([key, value]) => {
+                const IconComponent = Icons[key];
                 return (
                   <button 
                     key={key}
@@ -609,7 +581,7 @@ export default function App() {
                     onClick={() => setSelectedSector(key)}
                   >
                     <IconComponent />
-                    {i18n.language === 'en' ? value.en.split(' ')[0] : value.ja.replace('（IT）', '').split('・')[0]}
+                    {lang === 'en' ? value.en.split(' ')[0] : value.ja.replace('（IT）', '').split('・')[0]}
                   </button>
                 );
               })}
@@ -641,19 +613,18 @@ export default function App() {
                 {showCountrySuggestions && countrySuggestions.length > 0 && (
                   <div className="autocomplete-suggestions glass-panel">
                     {countrySuggestions.map(m => {
-                      const lang = i18n.language as 'en' | 'ja';
                       return (
                         <div 
                           key={m.id}
                           className="suggestion-item"
                           onClick={() => {
                             setSelectedCountryId(m.id);
-                            setCountrySearch(MEMBER_NAMES[m.id]?.[lang] || m.name);
+                            setCountrySearch(countryName(m, lang));
                             setShowCountrySuggestions(false);
                           }}
                         >
                           <img src={m.flag} alt="" style={{ width: '18px', height: '12px', marginRight: '0.5rem', borderRadius: '2px', objectFit: 'cover' }} />
-                          {MEMBER_NAMES[m.id]?.[lang] || m.name}
+                          {countryName(m, lang)}
                         </div>
                       );
                     })}
@@ -704,7 +675,7 @@ export default function App() {
           {isLoading ? (
             <div className="empty-state glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'center', justifyContent: 'center' }}>
               <div className="spinner" />
-              <span style={{ fontSize: '0.8rem', letterSpacing: '0.1em', fontWeight: '600', color: 'var(--text-muted)' }}>FETCHING LIVE API DATA...</span>
+              <span style={{ fontSize: '0.8rem', letterSpacing: '0.1em', fontWeight: '600', color: 'var(--text-muted)' }}>{t('loadingEvent')}</span>
             </div>
           ) : filteredResults.length === 0 ? (
             <div className="empty-state glass-panel">
@@ -876,19 +847,18 @@ export default function App() {
               {showChampionsCountrySuggestions && championsCountrySuggestions.length > 0 && (
                 <div className="autocomplete-suggestions glass-panel">
                   {championsCountrySuggestions.map(m => {
-                    const lang = i18n.language as 'en' | 'ja';
                     return (
                       <div 
                         key={m.id}
                         className="suggestion-item"
                         onClick={() => {
                           setSelectedChampionsCountryId(m.id);
-                          setChampionsCountrySearch(MEMBER_NAMES[m.id]?.[lang] || m.name);
+                          setChampionsCountrySearch(countryName(m, lang));
                           setShowChampionsCountrySuggestions(false);
                         }}
                       >
                         <img src={m.flag} alt="" style={{ width: '18px', height: '12px', marginRight: '0.5rem', borderRadius: '2px', objectFit: 'cover' }} />
-                        {MEMBER_NAMES[m.id]?.[lang] || m.name}
+                        {countryName(m, lang)}
                       </div>
                     );
                   })}
@@ -899,10 +869,10 @@ export default function App() {
           </div>
 
           {/* Mosaic Tiled Grid Display */}
-          {isLoading ? (
+          {!history ? (
             <div className="empty-state glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'center', justifyContent: 'center' }}>
               <div className="spinner" />
-              <span style={{ fontSize: '0.8rem', letterSpacing: '0.1em', fontWeight: '600', color: 'var(--text-muted)' }}>MAPPING CHAMPIONS WALL...</span>
+              <span style={{ fontSize: '0.8rem', letterSpacing: '0.1em', fontWeight: '600', color: 'var(--text-muted)' }}>{t('loadingHistory', { loaded: historyProgress, total: events.length })}</span>
             </div>
           ) : filteredWallResults.length === 0 ? (
             <div className="empty-state glass-panel">
@@ -938,7 +908,7 @@ export default function App() {
                     {/* Shortened elegant name display */}
                     <span className="tile-name">{shortNameText}</span>
                     {/* Event context year */}
-                    <span className="tile-year">{getEventYearLabel(res.event.name)}</span>
+                    <span className="tile-year">{getEventYearLabel(res.event)}</span>
                   </div>
                 );
               })}
@@ -948,58 +918,14 @@ export default function App() {
       )}
 
       {/* ====================================================
-         VIEW 2: STATS DASHBOARD (Global power indexing)
+         VIEW 2: ANALYTICS (medal trends across competitions)
          ==================================================== */}
       {!focusCompetitor && currentView === 'dashboard' && (
-        <main className="stats-view">
-          {isLoading ? (
-            <div className="empty-state glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'center', justifyContent: 'center' }}>
-              <div className="spinner" />
-              <span style={{ fontSize: '0.8rem', letterSpacing: '0.1em', fontWeight: '600', color: 'var(--text-muted)' }}>FETCHING LIVE STATS...</span>
-            </div>
-          ) : (
-            <div className="stats-card glass-panel" style={{ overflowX: 'auto' }}>
-              <div className="stats-table-header">
-                <span>{t('searchCountry')}</span>
-                <span style={{ textAlign: 'center' }}>🏅 {t('medalGold')}</span>
-                <span style={{ textAlign: 'center' }}>🥈 {t('medalSilver')}</span>
-                <span style={{ textAlign: 'center' }}>🥉 {t('medalBronze')}</span>
-                <span style={{ textAlign: 'right' }}>📊 {t('powerIndex')}</span>
-              </div>
-
-              {countryStats.map(stat => (
-                <div key={stat.member.id} className="stats-row">
-                  <div className="stats-country">
-                    <img src={stat.member.flag} alt="" style={{ width: '24px', height: '16px', borderRadius: '2px', objectFit: 'cover' }} />
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      <span>{getCountryName(stat.member)}</span>
-                      <span style={{ fontSize: '0.65rem', color: varRef('--text-muted') }}>
-                        {t('excellenceRate')}: {stat.excellenceRate}%
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="stats-medal-count gold" style={{ textAlign: 'center' }}>
-                    {stat.gold > 0 ? stat.gold : '-'}
-                  </div>
-                  <div className="stats-medal-count silver" style={{ textAlign: 'center' }}>
-                    {stat.silver > 0 ? stat.silver : '-'}
-                  </div>
-                  <div className="stats-medal-count bronze" style={{ textAlign: 'center' }}>
-                    {stat.bronze > 0 ? stat.bronze : '-'}
-                  </div>
-
-                  <div className="stats-rate-container" style={{ justifyContent: 'flex-end' }}>
-                    <div className="stats-rate-bar">
-                      <div className="stats-rate-fill" style={{ width: `${Math.min(stat.powerIndex * 5, 100)}%` }} />
-                    </div>
-                    <span className="stats-rate-val">{stat.powerIndex}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </main>
+        <AnalyticsView
+          events={events}
+          history={history}
+          progress={{ loaded: historyProgress, total: events.length }}
+        />
       )}
 
       {/* ====================================================
@@ -1010,7 +936,7 @@ export default function App() {
           {isLoading ? (
             <div className="empty-state glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'center', justifyContent: 'center' }}>
               <div className="spinner" />
-              <span style={{ fontSize: '0.8rem', letterSpacing: '0.1em', fontWeight: '600', color: 'var(--text-muted)' }}>FETCHING LIVE CATALOG...</span>
+              <span style={{ fontSize: '0.8rem', letterSpacing: '0.1em', fontWeight: '600', color: 'var(--text-muted)' }}>{t('loadingEvent')}</span>
             </div>
           ) : selectedSkillForLegend !== null ? (
             <div className="skill-legend-panel glass-panel">
@@ -1026,7 +952,7 @@ export default function App() {
               <div className="legend-list">
                 {/* Winners of this skill across the active results */}
                 {allResults
-                  .filter(r => r.skillId === selectedSkillForLegend && (r.medal === 'GOLD' || r.medal === 'SILVER' || r.medal === 'BRONZE'))
+                  .filter(r => r.skillId === selectedSkillForLegend && isPodium(r.medal))
                   .sort((a, b) => a.position - b.position)
                   .map(leg => (
                     <div key={leg.id} className="legend-row">
@@ -1053,10 +979,10 @@ export default function App() {
               </div>
             </div>
           ) : (
-            Object.entries(skillsBySector).map(([sectorKey, sectorSkills]) => (
+            skillsBySector.map(({ sector: sectorKey, skills: sectorSkills }) => (
               <section key={sectorKey} className="sector-section">
                 <h3 className="sector-section-title">
-                  {i18n.language === 'en' ? SECTOR_NAMES[sectorKey].en : SECTOR_NAMES[sectorKey].ja}
+                  {SECTOR_NAMES[sectorKey][lang]}
                 </h3>
                 
                 <div className="skills-subgrid">
@@ -1118,9 +1044,4 @@ export default function App() {
 
     </div>
   );
-}
-
-// Inline helper for loading css variables safely
-function varRef(name: string) {
-  return `var(${name})`;
 }
